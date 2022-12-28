@@ -1,0 +1,141 @@
+Script
+
+#!/bin/bash
+
+##Pod-1:
+podman pod create --name prometheus --publish 9090:9090 --publish 3000:3000
+
+##Prometheus
+podman run -itd --pod prometheus --name prom -v /home/thinkpad/Documents/complete/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml docker.io/prom/prometheus
+
+##Grafana
+podman run -itd --pod prometheus --name grafana docker.io/grafana/grafana
+
+
+##Pod-2:
+podman pod create --name guacamole --publish 9080:8080 --publish 4822:4822 --publish 9256:9256 --publish 9187:9187 --publish 5432:5432 --publish 5556:5556 --publish 9999:9999
+
+##guacamole-postgres
+podman run -dt --pod guacamole --name guacamole-postgres -e POSTGRES_DB=guacamole_db -e POSTGRES_USER=guacamole_user -e POSTGRES_PASSWORD=redhat -e PGDATA=/var/lib/postgresql/data/pgdata -v /home/thinkpad/Documents/complete/guacamole-postgres/postgres:/var/lib/postgresql/data  docker.io/postgres
+
+##guacamole-guacd
+podman run -dt --pod guacamole --name guacamole-guacd  docker.io/guacamole/guacd
+
+
+##guacamole-app
+podman run -idt --pod guacamole --name guacamole-app  -v /home/thinkpad/Documents/complete/guacamole-app/tomcat.yaml:/usr/local/tomcat/bin/tomcat.yml -v /home/thinkpad/Documents/complete/guacamole-app/jmx_prometheus_javaagent-0.16.1.jar:/usr/local/tomcat/bin/jmx_prometheus_javaagent-0.16.1.jar  -v /home/thinkpad/Documents/complete/guacamole-app/setenv.sh:/usr/local/tomcat/bin/setenv.sh -e POSTGRES_HOSTNAME=localhost -e POSTGRES_DATABASE=guacamole_db -e POSTGRES_USER=guacamole_user -e POSTGRES_PASSWORD=redhat -e GUACD_HOSTNAME=localhost  docker.io/guacamole/guacamole
+
+##pgsql-exporter
+podman  run -itd --pod guacamole --name pgsql-exporter -e DATA_SOURCE_NAME="postgresql://guacamole_user:redhat@127.0.0.1:5432/guacamole_db?sslmode=disable" quay.io/prometheuscommunity/postgres-exporter
+podman  run -itd --pod guacamole --name process-exporter --privileged -v /proc:/host/proc docker.io/ncabatoff/process-exporter
+
+
+===========================================================
+Download below Jar
+1. wget https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.16.1/jmx_prometheus_javaagent-0.16.1.jar
+
+# podman run -itd --name tomcat -p 8080:8080 -p 9999:9999 -v ./tomcat.yaml:/usr/local/tomcat/bin/tomcat.yml -v ./jmx_prometheus_javaagent-0.16.1.jar:/usr/local/tomcat/bin/jmx_prometheus_javaagent-0.16.1.jar -v ./setenv.sh:/usr/local/tomcat/bin/setenv.sh docker.io/library/tomcat:9
+
+cat setenv.sh
+
+JAVA_OPTS="$JAVA_OPTS -javaagent:/usr/local/tomcat/bin/jmx_prometheus_javaagent-0.16.1.jar=9999://usr/local/tomcat/bin/tomcat.yml"
+export JAVA_OPTS
+
+
+cat tomcat.yaml
+
+---  
+lowercaseOutputLabelNames: true
+lowercaseOutputName: true
+rules:
+- pattern: 'Catalina<type=GlobalRequestProcessor, name=\"(\w+-\w+)-(\d+)\"><>(\w+):'
+  name: tomcat_$3_total
+  labels:
+    port: "$2"
+    protocol: "$1"
+  help: Tomcat global $3
+  type: COUNTER
+- pattern: 'Catalina<j2eeType=Servlet, WebModule=//([-a-zA-Z0-9+&@#/%?=~_|!:.,;]*[-a-zA-Z0-9+&@#/%=~_|]), name=([-a-zA-Z0-9+/$%~_-|!.]*), J2EEApplication=none, J2EEServer=none><>(requestCount|maxTime|processingTime|errorCount):'
+  name: tomcat_servlet_$3_total
+  labels:
+    module: "$1"
+    servlet: "$2"
+  help: Tomcat servlet $3 total
+  type: COUNTER
+- pattern: 'Catalina<type=ThreadPool, name="(\w+-\w+)-(\d+)"><>(currentThreadCount|currentThreadsBusy|keepAliveCount|pollerThreadCount|connectionCount):'
+  name: tomcat_threadpool_$3
+  labels:
+    port: "$2"
+    protocol: "$1"
+  help: Tomcat threadpool $3
+  type: GAUGE
+- pattern: 'Catalina<type=Manager, host=([-a-zA-Z0-9+&@#/%?=~_|!:.,;]*[-a-zA-Z0-9+&@#/%=~_|]), context=([-a-zA-Z0-9+/$%~_-|!.]*)><>(processingTime|sessionCounter|rejectedSessions|expiredSessions):'
+  name: tomcat_session_$3_total
+  labels:
+    context: "$2"
+    host: "$1"
+  help: Tomcat session $3 total
+  type: COUNTER
+
+======================================================================
+Guacamole:
+$ podman exec -it guacamole-app bash
+$ guacamole@guacamole:/opt/guacamole$ /opt/guacamole/bin/initdb.sh --postgres > /tmp/initdb.sql
+$ exit
+===Now, from the base Host, again
+$ podman cp guacamole-app:/tmp/initdb.sql .
+$podman cp initdb.sql guacamole-postgres:/tmp
+
+==Now login into postgres container
+$ podman exec -it guacamole-postgres bash
+root@guacamole:/# psql -h 127.0.0.1 -U guacamole_user -d guacamole_db < /tmp/initdb.sql
+CREATE TYPE
+.
+.
+root@guacamole:/#
+exit
+===
+
+Then you might need to add this line in your hosts /etc/ssh/sshd_config
+
+Then restart sshd service and check it's status
+$ sudo cat /etc/ssh/sshd_config
+HostKeyAlgorithms +ssh-rsa
+
+==
+$ sudo systemctl restart sshd
+$ sudo systemctl status sshd
+===
+
+Now open in your browser - URL - http://localhost:9080/guacamole 
+
+
+
+
+This is because of a permission issue.. Resolution =>
+
+a) Simply run postgres container as =>
+
+$ podman run -d --name test-postgres  -e POSTGRES_DB=guacamole_db -e POSTGRES_USER=guacamole_user -e POSTGRES_PASSWORD=redhat postgres
+
+b) Then login into the running container
+
+$ podman exec -it test-postgres bash
+
+get the id of the postgres user => 
+
+$ id postgres
+
+Then logout of the container
+
+Lets say the id is 1000, 
+
+in that case, run
+
+$ podman unshare chown -R 1000 /home/rohit/guacamole/postgres
+
+===
+
+Now stop and remove the running container => 
+
+
